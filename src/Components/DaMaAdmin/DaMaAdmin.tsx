@@ -11,11 +11,17 @@ import TextField from "@mui/material/TextField";
 
 import { FSAWithPayloadAndMeta } from "flux-standard-action";
 
-const dataSource = "USDOT/FHWA/NPMRDS/TMC_IDENTIFICATION";
+const dataSource = "usdot/fhwa/npmrds/tmc_identification";
 const dataSources = [dataSource];
 
-async function sendEvent(event: FSAWithPayloadAndMeta) {
-  const res = await fetch("http://localhost:3369/admin/dispatch", {
+const pgEnvs = ["dama_dev_1", "dama_dev_2"];
+
+function getApiUrlBase(pgEnv: string) {
+  return `http://localhost:3369/dama-admin/${pgEnv}`;
+}
+
+async function sendEvent(event: FSAWithPayloadAndMeta, pgEnv: string) {
+  const res = await fetch(`${getApiUrlBase(pgEnv)}/events/dispatch`, {
     method: "POST",
     headers: {
       Accept: "application/json",
@@ -52,12 +58,10 @@ export default function FormPropsTextFields() {
     FSAWithPayloadAndMeta[] | null
   >(null);
 
-  const [pgEnv, setPgEnv] = useState("development");
+  const [pgEnv, setPgEnv] = useState(pgEnvs[0]);
 
-  if (pgEnv !== "development") {
-    throw new Error(
-      "development is currently the only supported PostgreSQL enviroment."
-    );
+  if (pgEnv === "production" || pgEnv === "pluto") {
+    throw new Error("Whoa! This code is not ready for production.");
   }
 
   return (
@@ -141,20 +145,23 @@ export default function FormPropsTextFields() {
                     setEtlContextId(null);
                     setPendingQARequests(null);
 
-                    const damaEvent = await sendEvent({
-                      type: "USDOT/FHWA/NPMRDS/TMC_IDENTIFICATION::LOAD_REQUEST",
-                      // @ts-ignore
-                      payload: {
-                        npmrds_export_sqlite_db_path: npmrdsExportSqliteDbPath,
-                        pg_env: pgEnv,
+                    const damaEvent = await sendEvent(
+                      {
+                        type: "usdot/fhwa/npmrds/tmc_identification:LOAD_REQUEST",
+                        // @ts-ignore
+                        payload: {
+                          npmrds_export_sqlite_db_path:
+                            npmrdsExportSqliteDbPath,
+                        },
+                        // @ts-ignore
+                        meta: {
+                          DAMAA: true,
+                          user: "mock-admin",
+                          timestamp: new Date().toISOString(),
+                        },
                       },
-                      // @ts-ignore
-                      meta: {
-                        DAMAA: true,
-                        user: "mock-admin",
-                        timestamp: new Date().toISOString(),
-                      },
-                    });
+                      pgEnv
+                    );
 
                     let {
                       event_id,
@@ -165,7 +172,7 @@ export default function FormPropsTextFields() {
 
                     async function poll() {
                       const url = new URL(
-                        "http://localhost:3369/admin/query-events"
+                        `${getApiUrlBase(pgEnv)}/events/query`
                       );
 
                       const params = {
@@ -189,11 +196,11 @@ export default function FormPropsTextFields() {
                         );
 
                         const qaReqEvents = events.filter(({ type }) =>
-                          /::QA_REQUEST$/.test(type)
+                          /:QA_REQUEST$/.test(type)
                         );
 
                         const viewMetaEvents = events.filter(({ type }) =>
-                          /::VIEW_METADATA_TEMPLATE$/.test(type)
+                          /:VIEW_METADATA_TEMPLATE$/.test(type)
                         );
 
                         console.log(JSON.stringify(events, null, 4));
@@ -207,6 +214,17 @@ export default function FormPropsTextFields() {
                           ...(pendingViewMeta || []),
                           ...viewMetaEvents,
                         ]);
+
+                        if (
+                          qaReqEvents.length === 0 &&
+                          viewMetaEvents.length === 0 &&
+                          events.some(({ type }) => /:FINAL$/.test(type))
+                        ) {
+                          // @ts-ignore
+                          clearInterval(pollIntervalId);
+                          setPollIntervalId(null);
+                          setEtlContextId(null);
+                        }
                       }
                     }
 
@@ -235,14 +253,20 @@ export default function FormPropsTextFields() {
                           type: qaReq.type.replace(/REQUEST$/, "APPROVED"),
                           payload: qaReq.payload,
                           meta: {
+                            // @ts-ignore
                             ...qaReq.meta,
                             timestamp: new Date().toISOString(),
                           },
                         };
 
-                        sendEvent(event);
+                        sendEvent(event, pgEnv);
 
-                        setPendingQARequests(pendingQARequests.slice(1));
+                        const newPendingQARequests =
+                          pendingQARequests.length > 1
+                            ? pendingQARequests.slice(1)
+                            : null;
+
+                        setPendingQARequests(newPendingQARequests);
                       }}
                     >
                       Approve QA
@@ -263,12 +287,13 @@ export default function FormPropsTextFields() {
                           type: viewMeta.type.replace(/TEMPLATE$/, "SUBMITTED"),
                           payload: viewMeta.payload,
                           meta: {
+                            // @ts-ignore
                             ...viewMeta.meta,
                             timestamp: new Date().toISOString(),
                           },
                         };
 
-                        sendEvent(event);
+                        sendEvent(event, pgEnv);
 
                         setPendingViewMeta(pendingViewMeta.slice(1));
                       }}
